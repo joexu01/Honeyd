@@ -200,6 +200,9 @@ struct command {
 	void *state;		/* Currently used only for Python */
 };
 
+// log file for connection logs
+extern FILE *honeyd_conn_log;
+
 /*
  * For subsystems, we need to be able to schedule a callback that hands
  * the subsytem a file descriptor to the new connection.  However, Honeyd
@@ -350,6 +353,8 @@ struct tuple *tuple_find(struct tree *, struct tuple *);
 void honeyd_ip_send(u_char *, u_int, struct spoof spoof);
 void honeyd_dispatch(struct template *, const struct interface *, struct ip_hdr *, u_short);
 char *honeyd_contoa(const struct tuple *);
+char *honeyd_ntoa_src(const struct tuple *);
+char *honeyd_ntoa_dst(const struct tuple *);
 
 void honeyd_input(const struct interface *, struct ip_hdr *, u_short);
 

@@ -56,6 +56,10 @@
 #include <grp.h>
 #include <pcap.h>
 
+// to get port and address
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
 #undef timeout_pending
 #undef timeout_initialized
 
@@ -80,42 +84,42 @@ ssize_t atomicio(ssize_t (*)(), int, void *, size_t);
 extern struct callback cb_tcp;
 extern struct callback cb_udp;
 
+// log file for connection logs
+FILE *honeyd_conn_log;
+
 void
-cmd_trigger_read(struct command *cmd, int size)
-{
- 	if (cmd->pfd == -1 || !cmd->fdconnected)
-		return;
-	if (size)
-		TRACE(event_get_fd(cmd->pread), event_add(cmd->pread, NULL));
+cmd_trigger_read(struct command *cmd, int size) {
+    if (cmd->pfd == -1 || !cmd->fdconnected)
+        return;
+    if (size)
+        TRACE(event_get_fd(cmd->pread), event_add(cmd->pread, NULL));
 }
 
 void
-cmd_trigger_write(struct command *cmd, int size)
-{
- 	if (cmd->pfd == -1 || !cmd->fdconnected)
-		return;
-	if (size)
-		TRACE(event_get_fd(cmd->pwrite), event_add(cmd->pwrite, NULL));
+cmd_trigger_write(struct command *cmd, int size) {
+    if (cmd->pfd == -1 || !cmd->fdconnected)
+        return;
+    if (size)
+        TRACE(event_get_fd(cmd->pwrite), event_add(cmd->pwrite, NULL));
 }
 
 void
-cmd_free(struct command *cmd)
-{
-	if (cmd->pread != NULL)
-		TRACE(event_get_fd(cmd->pread), event_del(cmd->pread));
+cmd_free(struct command *cmd) {
+    if (cmd->pread != NULL)
+        TRACE(event_get_fd(cmd->pread), event_del(cmd->pread));
 
-	if (cmd->pwrite != NULL)
-		TRACE(event_get_fd(cmd->pwrite), event_del(cmd->pwrite));
+    if (cmd->pwrite != NULL)
+        TRACE(event_get_fd(cmd->pwrite), event_del(cmd->pwrite));
 
-	TRACE_RESET(cmd->pfd, close(cmd->pfd));
-	cmd->pfd = -1;
-	cmd->pid = -1;
+    TRACE_RESET(cmd->pfd, close(cmd->pfd));
+    cmd->pfd = -1;
+    cmd->pid = -1;
 
-	if (cmd->perrfd != -1) {
-		TRACE(event_get_fd(cmd->peread), event_del(cmd->peread));
-		TRACE_RESET(cmd->perrfd, close(cmd->perrfd));
-		cmd->perrfd = -1;
-	}
+    if (cmd->perrfd != -1) {
+        TRACE(event_get_fd(cmd->peread), event_del(cmd->peread));
+        TRACE_RESET(cmd->perrfd, close(cmd->perrfd));
+        cmd->perrfd = -1;
+    }
 
 #ifdef HAVE_PYTHON
 	if (cmd->state != NULL)
@@ -124,139 +128,153 @@ cmd_free(struct command *cmd)
 }
 
 void
-cmd_ready_fd(struct command *cmd, struct callback *cb, void *con)
-{
-	TRACE(cmd->pfd,
-		cmd->pread = event_new(libevent_base, cmd->pfd, EV_READ, cb->cb_read, con));
-	TRACE(cmd->pfd,
-		cmd->pwrite = event_new(libevent_base, cmd->pfd, EV_WRITE, cb->cb_write, con));
-	cmd->fdconnected = 1;
+cmd_ready_fd(struct command *cmd, struct callback *cb, void *con) {
+    TRACE(cmd->pfd,
+          cmd->pread = event_new(libevent_base, cmd->pfd, EV_READ, cb->cb_read, con));
+    TRACE(cmd->pfd,
+          cmd->pwrite = event_new(libevent_base, cmd->pfd, EV_WRITE, cb->cb_write, con));
+    cmd->fdconnected = 1;
 
-	if (cmd->perrfd != -1) {
-		TRACE(cmd->perrfd,
-			cmd->peread = event_new(libevent_base, cmd->perrfd, EV_READ, cb->cb_eread, con));
-	}
+    if (cmd->perrfd != -1) {
+        TRACE(cmd->perrfd,
+              cmd->peread = event_new(libevent_base, cmd->perrfd, EV_READ, cb->cb_eread, con));
+    }
 }
 
 struct addrinfo *
-cmd_proxy_getinfo(char *address, int type, short port)
-{
-	struct addrinfo ai, *aitop;
-        char strport[NI_MAXSERV];
+cmd_proxy_getinfo(char *address, int type, short port) {
+    struct addrinfo ai, *aitop;
+    char strport[NI_MAXSERV];
 
-        memset(&ai, 0, sizeof (ai));
-        ai.ai_family = AF_INET;
-        ai.ai_socktype = type;
-        ai.ai_flags = 0;
-        snprintf(strport, sizeof (strport), "%d", port);
-        if (getaddrinfo(address, strport, &ai, &aitop) != 0) {
-                warn("getaddrinfo: %s:%d", address, port);
-                return (NULL);
-        }
+    memset(&ai, 0, sizeof (ai));
+    ai.ai_family = AF_INET;
+    ai.ai_socktype = type;
+    ai.ai_flags = 0;
+    snprintf(strport, sizeof (strport), "%d", port);
+    if (getaddrinfo(address, strport, &ai, &aitop) != 0) {
+        warn("getaddrinfo: %s:%d", address, port);
+        return (NULL);
+    }
 
-	return (aitop);
+    return (aitop);
 }
 
 int
 cmd_proxy_connect(struct tuple *hdr, struct command *cmd, struct addrinfo *ai,
-    void *con)
-{
-	char ntop[NI_MAXHOST], strport[NI_MAXSERV];
-	char *host = ntop, *port = strport;
-	struct callback *cb;
-	struct timeval tv = {10, 0};
-        int fd;
-        
-	if (hdr->type == SOCK_STREAM)
-		cb = &cb_tcp;
-	else
-		cb = &cb_udp;
+                  void *con) {
+    char ntop[NI_MAXHOST], strport[NI_MAXSERV];
+    char *host = ntop, *port = strport;
+    struct callback *cb;
+    struct timeval tv = {10, 0};
+    int fd;
 
-        fd = socket(AF_INET, hdr->type, 0);
-        if (fd == -1) {
-                warn("socket");
-                return (-1);
+    if (hdr->type == SOCK_STREAM)
+        cb = &cb_tcp;
+    else
+        cb = &cb_udp;
+
+    fd = socket(AF_INET, hdr->type, 0);
+    if (fd == -1) {
+        warn("socket");
+        return (-1);
+    }
+
+    if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1)
+        warn("fcntl(O_NONBLOCK)");
+
+    if (fcntl(fd, F_SETFD, 1) == -1)
+        warn("fcntl(F_SETFD)");
+
+    TRACE(fd, cmd->pfd = fd);
+    if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+        (*cb->cb_connect)(fd, EV_WRITE, con);
+        return (0);
+    }
+
+    if (errno != EINPROGRESS) {
+        warn("connect");
+        cmd->pfd = -1;
+        TRACE_RESET(fd, close(fd));
+        return (-1);
+    }
+
+    TRACE(fd, cmd->pwrite = event_new(libevent_base, fd, EV_WRITE, cb->cb_connect, con));
+    TRACE(event_get_fd(cmd->pwrite), event_add(cmd->pwrite, &tv));
+
+    if (getnameinfo(ai->ai_addr, ai->ai_addrlen,
+                    ntop, sizeof(ntop), strport, sizeof(strport),
+                    NI_NUMERICHOST | NI_NUMERICSERV) != 0) {
+        host = "<hosterror>";
+        port = "<porterror>";
+    }
+    syslog(LOG_INFO, "Connection established: %s -> proxy to %s:%s",
+           honeyd_contoa(hdr), host, port);
+
+    struct sockaddr_in local_addr;
+    int local_addr_length = sizeof(local_addr);
+    int get_info_ret = 0;
+    get_info_ret = getsockname(fd, (struct sockaddr *) &local_addr, &local_addr_length);
+    if (get_info_ret != 0) {
+        syslog(LOG_ERR, "{\"status\": \"%s\", \"errno\": %d, \"message\": \"%s\", \"op\": \"%s\"}",
+               "failed", get_info_ret, "get local socket info failed", "proxy getsockname");
+    } else {
+        syslog(LOG_INFO, "{\"status\": \"%s\", \"errno\": %d, \"localAddr\": \"%s:%d\", \"remoteAddr\": \"%s\"}",
+               "success", get_info_ret, inet_ntoa(local_addr.sin_addr), ntohs(local_addr.sin_port), honeyd_contoa(hdr));
+        if (honeyd_conn_log != NULL) {
+            fprintf(honeyd_conn_log,
+                    "{\"type\": \"%s\", \"localAddr\": \"%s:%d\", \"remoteAddr\": \"%s\", \"targetAddr\": \"%s\", \"proxyTo\":\"%s:%s\"}\n",
+                    "establish", inet_ntoa(local_addr.sin_addr), ntohs(local_addr.sin_port),
+                    honeyd_ntoa_src(hdr), honeyd_ntoa_dst(hdr), host, port);
+            fflush(honeyd_conn_log);
         }
+    }
 
-        if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1)
-                warn("fcntl(O_NONBLOCK)");
-
-        if (fcntl(fd, F_SETFD, 1) == -1)
-                warn("fcntl(F_SETFD)");
-
-	TRACE(fd, cmd->pfd = fd);
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
-		(*cb->cb_connect)(fd, EV_WRITE, con);
-		return (0);
-	}
-
-	if (errno != EINPROGRESS) {
-		warn("connect");
-		cmd->pfd = -1;
-		TRACE_RESET(fd, close(fd));
-		return (-1);
-	}
-
-	TRACE(fd,cmd->pwrite = event_new(libevent_base, fd, EV_WRITE, cb->cb_connect, con));
-	TRACE(event_get_fd(cmd->pwrite), event_add(cmd->pwrite, &tv));
-
-	if (getnameinfo(ai->ai_addr, ai->ai_addrlen,
-		ntop, sizeof(ntop), strport, sizeof(strport),
-		NI_NUMERICHOST|NI_NUMERICSERV) != 0) {
-
-		host = "<hosterror>";
-		port = "<porterror>";
-	}
-	syslog(LOG_INFO, "Connection established: %s -> proxy to %s:%s",
-	    honeyd_contoa(hdr), host, port);
-
-	return (0);
+    return (0);
 }
 
 void
-cmd_environment(struct template *tmpl, struct tuple *hdr)
-{
-	char line[256];
-	struct addr addr;
-	struct ip_hdr ip;
-	char *os_name;
+cmd_environment(struct template *tmpl, struct tuple *hdr) {
+    char line[256];
+    struct addr addr;
+    struct ip_hdr ip;
+    char *os_name;
 
-	if (tmpl->person != NULL) {
-		snprintf(line, sizeof(line), "%s", tmpl->person->name);
-		setenv("HONEYD_PERSONALITY", line, 1);
-	}
+    if (tmpl->person != NULL) {
+        snprintf(line, sizeof(line), "%s", tmpl->person->name);
+        setenv("HONEYD_PERSONALITY", line, 1);
+    }
 
-	if (hdr == NULL)
-		return;
-	     
-	/* Determine the remote operating system */
-	ip.ip_src = hdr->ip_src;
-	os_name = honeyd_osfp_name(&ip);
-	if (os_name != NULL) {
-		setenv("HONEYD_REMOTE_OS", os_name, 1);
-	}
+    if (hdr == NULL)
+        return;
 
-	addr_pack(&addr, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_src,IP_ADDR_LEN);
-	snprintf(line, sizeof(line), "%s", addr_ntoa(&addr));
-	setenv("HONEYD_IP_SRC", line, 1);
+    /* Determine the remote operating system */
+    ip.ip_src = hdr->ip_src;
+    os_name = honeyd_osfp_name(&ip);
+    if (os_name != NULL) {
+        setenv("HONEYD_REMOTE_OS", os_name, 1);
+    }
 
-	addr_pack(&addr, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_dst,IP_ADDR_LEN);
-	snprintf(line, sizeof(line), "%s", addr_ntoa(&addr));
-	setenv("HONEYD_IP_DST", line, 1);
+    addr_pack(&addr, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_src, IP_ADDR_LEN);
+    snprintf(line, sizeof(line), "%s", addr_ntoa(&addr));
+    setenv("HONEYD_IP_SRC", line, 1);
 
-	if (hdr->iface != NULL) {
-		snprintf(line, sizeof(line), "%s", hdr->iface->if_ent.intf_name);
-		setenv("HONEYD_INTERFACE", line, 1);
-	}
+    addr_pack(&addr, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_dst, IP_ADDR_LEN);
+    snprintf(line, sizeof(line), "%s", addr_ntoa(&addr));
+    setenv("HONEYD_IP_DST", line, 1);
 
-	snprintf(line, sizeof(line), "%s", tmpl->name);
-	setenv("HONEYD_TEMPLATE_NAME", line, 1);
+    if (hdr->iface != NULL) {
+        snprintf(line, sizeof(line), "%s", hdr->iface->if_ent.intf_name);
+        setenv("HONEYD_INTERFACE", line, 1);
+    }
 
-	snprintf(line, sizeof(line), "%d", hdr->sport);
-	setenv("HONEYD_SRC_PORT", line, 1);
+    snprintf(line, sizeof(line), "%s", tmpl->name);
+    setenv("HONEYD_TEMPLATE_NAME", line, 1);
 
-	snprintf(line, sizeof(line), "%d", hdr->dport);
-	setenv("HONEYD_DST_PORT", line, 1);
+    snprintf(line, sizeof(line), "%d", hdr->sport);
+    setenv("HONEYD_SRC_PORT", line, 1);
+
+    snprintf(line, sizeof(line), "%d", hdr->dport);
+    setenv("HONEYD_DST_PORT", line, 1);
 }
 
 #define SETERROR(x) do { \
@@ -267,14 +285,13 @@ cmd_environment(struct template *tmpl, struct tuple *hdr)
 /* Drop the privileges and verify that they got dropped */
 
 void
-cmd_droppriv(uid_t uid, gid_t gid)
-{
-	static char error[1024];
-	static char errline[256];
+cmd_droppriv(uid_t uid, gid_t gid) {
+    static char error[1024];
+    static char errline[256];
 
-	error[0] = '\0';
+    error[0] = '\0';
 
-	/* Lower privileges */
+    /* Lower privileges */
 #ifdef HAVE_SETGROUPS
 	if (setgroups(1, &gid) == -1)
 		SETERROR((errline, sizeof(errline),
@@ -285,12 +302,12 @@ cmd_droppriv(uid_t uid, gid_t gid)
 		SETERROR((errline, sizeof(errline),
 			     "%s: setregid(%d) failed\n", __func__, gid));
 #endif
-	if (setegid(gid) == -1)
-		SETERROR((errline, sizeof(errline),
-			     "%s: setegid(%d) failed\n", __func__, gid));
-	if (setgid(gid) == -1)
-		SETERROR((errline, sizeof(errline), 
-			     "%s: setgid(%d) failed\n", __func__, gid));
+    if (setegid(gid) == -1)
+        SETERROR((errline, sizeof(errline),
+        "%s: setegid(%d) failed\n", __func__, gid));
+    if (setgid(gid) == -1)
+        SETERROR((errline, sizeof(errline),
+        "%s: setgid(%d) failed\n", __func__, gid));
 #ifdef HAVE_SETREUID
 	if (setreuid(uid, uid) == -1)
 		SETERROR((errline, sizeof(errline),
@@ -301,438 +318,421 @@ cmd_droppriv(uid_t uid, gid_t gid)
 		SETERROR((errline, sizeof(errline),
 			     "%s: seteuid(%d) failed\n", __func__, gid));
 #endif
-	if (setuid(uid) == -1)
-		SETERROR((errline, sizeof(errline),
-			     "%s: setuid(%d) failed\n", __func__, gid));
+    if (setuid(uid) == -1)
+        SETERROR((errline, sizeof(errline),
+        "%s: setuid(%d) failed\n", __func__, gid));
 
-	if (getgid() != gid || getegid() != gid) {
-		SETERROR((errline, sizeof(errline),
-			     "%s: could not set gid to %d", __func__, gid));
-		goto error;
-	}
+    if (getgid() != gid || getegid() != gid) {
+        SETERROR((errline, sizeof(errline),
+            "%s: could not set gid to %d", __func__, gid));
+        goto error;
+    }
 
-	if (getuid() != uid || geteuid() != uid) {
-		SETERROR((errline, sizeof(errline),
-			     "%s: could not set uid to %d", __func__, uid));
-		goto error;
-	}
+    if (getuid() != uid || geteuid() != uid) {
+        SETERROR((errline, sizeof(errline),
+            "%s: could not set uid to %d", __func__, uid));
+        goto error;
+    }
 
-	/* Make really sure that we dropped them */
-	if (uid != 0 && (setuid(0) != -1 || seteuid(0) != -1)) {
-		SETERROR((errline, sizeof(errline),
-			     "%s: did not successfully drop privilege",
-			     __func__));
-		goto error;
-	}
-	if (gid != 0 && (setgid(0) != -1 || setegid(0) != -1)) {
-		SETERROR((errline, sizeof(errline),
-			     "%s: did not successfully drop privilege",
-			     __func__));
-		goto error;
-	}
+    /* Make really sure that we dropped them */
+    if (uid != 0 && (setuid(0) != -1 || seteuid(0) != -1)) {
+        SETERROR((errline, sizeof(errline),
+            "%s: did not successfully drop privilege",
+            __func__));
+        goto error;
+    }
+    if (gid != 0 && (setgid(0) != -1 || setegid(0) != -1)) {
+        SETERROR((errline, sizeof(errline),
+            "%s: did not successfully drop privilege",
+            __func__));
+        goto error;
+    }
 
-	return;
- error:
- syslog(LOG_ERR,"%s: terminated",__func__);
- exit(EXIT_FAILURE);
+    return;
+error:
+    syslog(LOG_ERR, "%s: terminated", __func__);
+    exit(EXIT_FAILURE);
 }
 
 int
-cmd_setpriv(struct template *tmpl)
-{
-	extern uid_t honeyd_uid;
-	extern gid_t honeyd_gid;
-	uid_t uid = honeyd_uid;
-	gid_t gid = honeyd_gid;
-	int nofiles = 30;
-	struct rlimit rl;
+cmd_setpriv(struct template *tmpl) {
+    extern uid_t honeyd_uid;
+    extern gid_t honeyd_gid;
+    uid_t uid = honeyd_uid;
+    gid_t gid = honeyd_gid;
+    int nofiles = 30;
+    struct rlimit rl;
 
-	/* Set our own priority low */
-	setpriority(PRIO_PROCESS, 0, 10);
+    /* Set our own priority low */
+    setpriority(PRIO_PROCESS, 0, 10);
 
-	if (tmpl->uid)
-		uid = tmpl->uid;
-	if (tmpl->gid)
-		gid = tmpl->gid;
-	if (tmpl->max_nofiles)
-		nofiles = tmpl->max_nofiles;
+    if (tmpl->uid)
+        uid = tmpl->uid;
+    if (tmpl->gid)
+        gid = tmpl->gid;
+    if (tmpl->max_nofiles)
+        nofiles = tmpl->max_nofiles;
 
-	cmd_droppriv(uid, gid);
+    cmd_droppriv(uid, gid);
 
-	/* Raising file descriptor limits */
-	rl.rlim_cur = rl.rlim_max = nofiles;
-	if (setrlimit(RLIMIT_NOFILE, &rl) == -1)
-	{
-		syslog(LOG_ERR, "setrlimit: %d, failed to set resource limit", nofiles);
-		exit(EXIT_FAILURE);
-	}
+    /* Raising file descriptor limits */
+    rl.rlim_cur = rl.rlim_max = nofiles;
+    if (setrlimit(RLIMIT_NOFILE, &rl) == -1) {
+        syslog(LOG_ERR, "setrlimit: %d, failed to set resource limit", nofiles);
+        exit(EXIT_FAILURE);
+    }
 
-	return (0);
+    return (0);
 }
 
 int
 cmd_fork(struct tuple *hdr, struct command *cmd, struct template *tmpl,
-    char *execcmd, char **argv, void *con)
-{
-	extern int honeyd_nchildren;
-	int pair[2], perr[2];
-	struct callback *cb;
-	sigset_t sigmask;
+         char *execcmd, char **argv, void *con) {
+    extern int honeyd_nchildren;
+    int pair[2], perr[2];
+    struct callback *cb;
+    sigset_t sigmask;
 
-	if (socketpair(AF_UNIX, hdr->type, 0, pair) == -1)
-		return (-1);
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, perr) == -1) {
-		TRACE_RESET(pair[0], close(pair[0]));
-		TRACE_RESET(pair[1], close(pair[1]));
-		return (-1);
-	}
+    if (socketpair(AF_UNIX, hdr->type, 0, pair) == -1)
+        return (-1);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, perr) == -1) {
+        TRACE_RESET(pair[0], close(pair[0]));
+        TRACE_RESET(pair[1], close(pair[1]));
+        return (-1);
+    }
 
-	/* Block SIGCHLD */
-	sigemptyset(&sigmask);
-	sigaddset(&sigmask, SIGCHLD);
-	if (sigprocmask(SIG_BLOCK, &sigmask, NULL) == -1) {
-		warn("sigprocmask");
-		goto fork_err;
-	}
+    /* Block SIGCHLD */
+    sigemptyset(&sigmask);
+    sigaddset(&sigmask, SIGCHLD);
+    if (sigprocmask(SIG_BLOCK, &sigmask, NULL) == -1) {
+        warn("sigprocmask");
+        goto fork_err;
+    }
 
-	cmd->pid = fork();
-	if (cmd->pid == -1) {
-		warn("fork");
-		goto unmask_err;
-	}
+    cmd->pid = fork();
+    if (cmd->pid == -1) {
+        warn("fork");
+        goto unmask_err;
+    }
 
-	if (cmd->pid == 0) {
-		/* Child privileges */
-		cmd_setpriv(tmpl);
+    if (cmd->pid == 0) {
+        /* Child privileges */
+        cmd_setpriv(tmpl);
 
-		/* Child */
-		TRACE_RESET(pair[0], close(pair[0]));
-		if (dup2(pair[1], fileno(stdout)) == -1)
-		{
-			syslog(LOG_ERR, "%s: dup2 failed to copy descriptor",__func__);
-			exit(EXIT_FAILURE);
-		}
-		if (dup2(pair[1], fileno(stdin)) == -1)
-		{
-			syslog(LOG_ERR, "%s: dup2", __func__);
-			exit(EXIT_FAILURE);
-		}
-		TRACE_RESET(pair[0], close(perr[0]));
-		if (dup2(perr[1], fileno(stderr)) == -1)
-		{
-			syslog(LOG_ERR, "%s: dup2", __func__);
-			exit(EXIT_FAILURE);
-		}
+        /* Child */
+        TRACE_RESET(pair[0], close(pair[0]));
+        if (dup2(pair[1], fileno(stdout)) == -1) {
+            syslog(LOG_ERR, "%s: dup2 failed to copy descriptor", __func__);
+            exit(EXIT_FAILURE);
+        }
+        if (dup2(pair[1], fileno(stdin)) == -1) {
+            syslog(LOG_ERR, "%s: dup2", __func__);
+            exit(EXIT_FAILURE);
+        }
+        TRACE_RESET(pair[0], close(perr[0]));
+        if (dup2(perr[1], fileno(stderr)) == -1) {
+            syslog(LOG_ERR, "%s: dup2", __func__);
+            exit(EXIT_FAILURE);
+        }
 
-		TRACE_RESET(pair[1], close(pair[1]));
-		TRACE_RESET(perr[1], close(perr[1]));
+        TRACE_RESET(pair[1], close(pair[1]));
+        TRACE_RESET(perr[1], close(perr[1]));
 
-		cmd_environment(tmpl, hdr);
+        cmd_environment(tmpl, hdr);
 
-		if (execvp(execcmd, argv) == -1)
-		{
-			syslog(LOG_ERR, "%s: execv(%s): %s", __func__, execcmd, strerror(errno));
-			exit(EXIT_FAILURE);
-		}
+        if (execvp(execcmd, argv) == -1) {
+            syslog(LOG_ERR, "%s: execv(%s): %s", __func__, execcmd, strerror(errno));
+            exit(EXIT_FAILURE);
+        }
 
-		/* NOT REACHED */
-	}
+        /* NOT REACHED */
+    }
 
-	TRACE_RESET(pair[1], close(pair[1]));
-	TRACE(pair[0], cmd->pfd = pair[0]);
-	if (fcntl(cmd->pfd, F_SETFD, 1) == -1)
-		warn("fcntl(F_SETFD)");
-	if (fcntl(cmd->pfd, F_SETFL, O_NONBLOCK) == -1)
-		warn("fcntl(F_SETFL)");
+    TRACE_RESET(pair[1], close(pair[1]));
+    TRACE(pair[0], cmd->pfd = pair[0]);
+    if (fcntl(cmd->pfd, F_SETFD, 1) == -1)
+        warn("fcntl(F_SETFD)");
+    if (fcntl(cmd->pfd, F_SETFL, O_NONBLOCK) == -1)
+        warn("fcntl(F_SETFL)");
 
-	TRACE_RESET(perr[1], close(perr[1]));
-	cmd->perrfd = perr[0];
-	if (fcntl(cmd->perrfd, F_SETFD, 1) == -1)
-		warn("fcntl(F_SETFD)");
-	if (fcntl(cmd->perrfd, F_SETFL, O_NONBLOCK) == -1)
-		warn("fcntl(F_SETFL)");
+    TRACE_RESET(perr[1], close(perr[1]));
+    cmd->perrfd = perr[0];
+    if (fcntl(cmd->perrfd, F_SETFD, 1) == -1)
+        warn("fcntl(F_SETFD)");
+    if (fcntl(cmd->perrfd, F_SETFL, O_NONBLOCK) == -1)
+        warn("fcntl(F_SETFL)");
 
-	if (hdr->type == SOCK_STREAM)
-		cb = &cb_tcp;
-	else
-		cb = &cb_udp;
+    if (hdr->type == SOCK_STREAM)
+        cb = &cb_tcp;
+    else
+        cb = &cb_udp;
 
-	cmd_ready_fd(cmd, cb, con);
+    cmd_ready_fd(cmd, cb, con);
 
-	TRACE(event_get_fd(cmd->pread), event_add(cmd->pread, NULL));
-	TRACE(event_get_fd(cmd->peread), event_add(cmd->peread, NULL));
+    TRACE(event_get_fd(cmd->pread), event_add(cmd->pread, NULL));
+    TRACE(event_get_fd(cmd->peread), event_add(cmd->peread, NULL));
 
-	honeyd_nchildren++;
+    honeyd_nchildren++;
 
-	/* Install old signal handler */
-	if (sigprocmask(SIG_UNBLOCK, &sigmask, NULL) == -1) {
-		warn("sigprocmask");
-		goto fork_err;
-	}
-	return (0);
+    /* Install old signal handler */
+    if (sigprocmask(SIG_UNBLOCK, &sigmask, NULL) == -1) {
+        warn("sigprocmask");
+        goto fork_err;
+    }
+    return (0);
 
-	/* Error cleanup */
- unmask_err:
-	/* Install old signal handler */
-	if (sigprocmask(SIG_UNBLOCK, &sigmask, NULL) == -1)
-		warn("sigprocmask");
+    /* Error cleanup */
+unmask_err:
+    /* Install old signal handler */
+    if (sigprocmask(SIG_UNBLOCK, &sigmask, NULL) == -1)
+        warn("sigprocmask");
 
- fork_err:
-	TRACE_RESET(perr[0], close(perr[0]));
-	TRACE_RESET(perr[1], close(perr[1]));
-	TRACE_RESET(pair[0], close(pair[0]));
-	TRACE_RESET(pair[1], close(pair[1]));
-	cmd->pfd = -1;
+fork_err:
+    TRACE_RESET(perr[0], close(perr[0]));
+    TRACE_RESET(perr[1], close(perr[1]));
+    TRACE_RESET(pair[0], close(pair[0]));
+    TRACE_RESET(pair[1], close(pair[1]));
+    cmd->pfd = -1;
 
-	return (-1);
+    return (-1);
 }
 
 int
-cmd_python(struct tuple *hdr, struct command *cmd, void *con)
-{
-	int pair[2];
-	struct callback *cb;
+cmd_python(struct tuple *hdr, struct command *cmd, void *con) {
+    int pair[2];
+    struct callback *cb;
 
-	if (socketpair(AF_UNIX, hdr->type, 0, pair) == -1)
-		return (-1);
+    if (socketpair(AF_UNIX, hdr->type, 0, pair) == -1)
+        return (-1);
 
-	TRACE(pair[0], cmd->pfd = pair[0]);
-	if (fcntl(cmd->pfd, F_SETFD, 1) == -1)
-		warn("fcntl(F_SETFD)");
-	if (fcntl(cmd->pfd, F_SETFL, O_NONBLOCK) == -1)
-		warn("fcntl(F_SETFL)");
+    TRACE(pair[0], cmd->pfd = pair[0]);
+    if (fcntl(cmd->pfd, F_SETFD, 1) == -1)
+        warn("fcntl(F_SETFD)");
+    if (fcntl(cmd->pfd, F_SETFL, O_NONBLOCK) == -1)
+        warn("fcntl(F_SETFL)");
 
-	/* Python descriptors should not go across exec */
-	if (fcntl(pair[1], F_SETFD, 1) == -1)
-		warn("fcntl(F_SETFD)");
-	if (fcntl(pair[1], F_SETFL, O_NONBLOCK) == -1)
-		warn("fcntl(F_SETFL)");
+    /* Python descriptors should not go across exec */
+    if (fcntl(pair[1], F_SETFD, 1) == -1)
+        warn("fcntl(F_SETFD)");
+    if (fcntl(pair[1], F_SETFL, O_NONBLOCK) == -1)
+        warn("fcntl(F_SETFL)");
 
-	if (hdr->type == SOCK_STREAM)
-		cb = &cb_tcp;
-	else
-		cb = &cb_udp;
+    if (hdr->type == SOCK_STREAM)
+        cb = &cb_tcp;
+    else
+        cb = &cb_udp;
 
-	cmd_ready_fd(cmd, cb, con);
+    cmd_ready_fd(cmd, cb, con);
 
-	TRACE(event_get_fd(cmd->pread), event_add(cmd->pread, NULL));
+    TRACE(event_get_fd(cmd->pread), event_add(cmd->pread, NULL));
 
-	return (pair[1]);
+    return (pair[1]);
 }
 
 int
 cmd_subsystem(struct template *tmpl, struct subsystem *sub,
-    char *execcmd, char **argv)
-{
-	extern int honeyd_nchildren;
-	struct command *cmd = &sub->cmd;
-	extern struct callback subsystem_cb;
-	int pair[2];
-	sigset_t sigmask;
+              char *execcmd, char **argv) {
+    extern int honeyd_nchildren;
+    struct command *cmd = &sub->cmd;
+    extern struct callback subsystem_cb;
+    int pair[2];
+    sigset_t sigmask;
 
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == -1)
-		return (-1);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == -1)
+        return (-1);
 
-	/* Block SIGCHLD */
-	sigemptyset(&sigmask);
-	sigaddset(&sigmask, SIGCHLD);
-	if (sigprocmask(SIG_BLOCK, &sigmask, NULL) == -1) {
-		warn("sigprocmask");
-		goto fork_err;
-	}
+    /* Block SIGCHLD */
+    sigemptyset(&sigmask);
+    sigaddset(&sigmask, SIGCHLD);
+    if (sigprocmask(SIG_BLOCK, &sigmask, NULL) == -1) {
+        warn("sigprocmask");
+        goto fork_err;
+    }
 
-	cmd->pid = fork();
-	if (cmd->pid == -1) {
-		warn("fork");
-		goto unmask_err;
-	}
+    cmd->pid = fork();
+    if (cmd->pid == -1) {
+        warn("fork");
+        goto unmask_err;
+    }
 
-	if (cmd->pid == 0) {
-		char magic_buf[12];
-		int magic_fd;
-		/* Set privileges */
-		cmd_setpriv(tmpl);
+    if (cmd->pid == 0) {
+        char magic_buf[12];
+        int magic_fd;
+        /* Set privileges */
+        cmd_setpriv(tmpl);
 
-		/* Child */
-		TRACE_RESET(pair[0], close(pair[0]));
-		/* Set the communication fd */
-		if ((magic_fd = dup(pair[1])) == -1)
-		{
-			syslog(LOG_ERR, "%s: dup(%d): no magic failed to duplicate the pair", __func__, pair[1]);
-			exit(EXIT_FAILURE);
-		}
-		snprintf(magic_buf, sizeof(magic_buf), "%d", magic_fd);
-		setenv(SUBSYSTEM_MAGICFD, magic_buf, 1);
-		if (dup2(fileno(stderr), fileno(stdout)) == -1)
-		{
-			syslog(LOG_ERR, "%s: dup2", __func__);
-			exit(EXIT_FAILURE);
-		}
-		if (dup2(fileno(stderr), fileno(stdin)) == -1)
-		{
-			syslog(LOG_ERR, "%s: dup2", __func__);
-			exit(EXIT_FAILURE);
-		}
+        /* Child */
+        TRACE_RESET(pair[0], close(pair[0]));
+        /* Set the communication fd */
+        if ((magic_fd = dup(pair[1])) == -1) {
+            syslog(LOG_ERR, "%s: dup(%d): no magic failed to duplicate the pair", __func__, pair[1]);
+            exit(EXIT_FAILURE);
+        }
+        snprintf(magic_buf, sizeof(magic_buf), "%d", magic_fd);
+        setenv(SUBSYSTEM_MAGICFD, magic_buf, 1);
+        if (dup2(fileno(stderr), fileno(stdout)) == -1) {
+            syslog(LOG_ERR, "%s: dup2", __func__);
+            exit(EXIT_FAILURE);
+        }
+        if (dup2(fileno(stderr), fileno(stdin)) == -1) {
+            syslog(LOG_ERR, "%s: dup2", __func__);
+            exit(EXIT_FAILURE);
+        }
 
-		TRACE_RESET(pair[1], close(pair[1]));
+        TRACE_RESET(pair[1], close(pair[1]));
 
-		cmd_environment(tmpl, NULL);
+        cmd_environment(tmpl, NULL);
 
-		/* Setup the wrapper library */
-		if (setenv("LD_PRELOAD", PATH_HONEYDLIB"/libhoneyd.so", 1) == -1)
-		{
-			syslog(LOG_ERR, "%s: setenv", __func__);
-			exit(EXIT_FAILURE);
-		}
+        /* Setup the wrapper library */
+        if (setenv("LD_PRELOAD", PATH_HONEYDLIB"/libhoneyd.so", 1) == -1) {
+            syslog(LOG_ERR, "%s: setenv", __func__);
+            exit(EXIT_FAILURE);
+        }
 
-		if (execv(execcmd, argv) == -1)
-		{
-			syslog(LOG_ERR, "%s: execv(%s)", __func__, execcmd);
-			exit(EXIT_FAILURE);
-		}
+        if (execv(execcmd, argv) == -1) {
+            syslog(LOG_ERR, "%s: execv(%s)", __func__, execcmd);
+            exit(EXIT_FAILURE);
+        }
 
-		/* NOT REACHED */
-	}
+        /* NOT REACHED */
+    }
 
-	TRACE_RESET(pair[1], close(pair[1]));
-	TRACE(pair[0], cmd->pfd = pair[0]);
-	if (fcntl(cmd->pfd, F_SETFD, 1) == -1)
-		warn("fcntl(F_SETFD)");
+    TRACE_RESET(pair[1], close(pair[1]));
+    TRACE(pair[0], cmd->pfd = pair[0]);
+    if (fcntl(cmd->pfd, F_SETFD, 1) == -1)
+        warn("fcntl(F_SETFD)");
 
-	cmd->perrfd = -1;
-	cmd_ready_fd(cmd, &subsystem_cb, sub);
+    cmd->perrfd = -1;
+    cmd_ready_fd(cmd, &subsystem_cb, sub);
 
-	TRACE(event_get_fd(cmd->pread), event_add(cmd->pread, NULL));
+    TRACE(event_get_fd(cmd->pread), event_add(cmd->pread, NULL));
 
-	honeyd_nchildren++;
+    honeyd_nchildren++;
 
-	/* Install old signal handler */
-	if (sigprocmask(SIG_UNBLOCK, &sigmask, NULL) == -1) {
-		warn("sigprocmask");
-		goto fork_err;
-	}
-	return (0);
+    /* Install old signal handler */
+    if (sigprocmask(SIG_UNBLOCK, &sigmask, NULL) == -1) {
+        warn("sigprocmask");
+        goto fork_err;
+    }
+    return (0);
 
-	/* Error cleanup */
- unmask_err:
-	/* Install old signal handler */
-	if (sigprocmask(SIG_UNBLOCK, &sigmask, NULL) == -1)
-		warn("sigprocmask");
+    /* Error cleanup */
+unmask_err:
+    /* Install old signal handler */
+    if (sigprocmask(SIG_UNBLOCK, &sigmask, NULL) == -1)
+        warn("sigprocmask");
 
- fork_err:
-	TRACE_RESET(pair[0], close(pair[0]));
-	TRACE_RESET(pair[1], close(pair[1]));
-	cmd->pfd = -1;
+fork_err:
+    TRACE_RESET(pair[0], close(pair[0]));
+    TRACE_RESET(pair[1], close(pair[1]));
+    cmd->pfd = -1;
 
-	return (-1);
+    return (-1);
 }
 
 static void
-cmd_subsystem_connect_cb(int fd, short what, void *arg)
-{
-	struct port_encapsulate *tmp = arg;
-	struct port *port = tmp->port;
+cmd_subsystem_connect_cb(int fd, short what, void *arg) {
+    struct port_encapsulate *tmp = arg;
+    struct port *port = tmp->port;
 
-	TAILQ_REMOVE(&port->pending, tmp, next);
+    TAILQ_REMOVE(&port->pending, tmp, next);
 
-	if (what != EV_WRITE) {
-		/* We encountered some error with this */
-		if (tmp->hdr->type == SOCK_STREAM)
-			tcp_connectfail(tmp->con);
-		goto out;
-	}
+    if (what != EV_WRITE) {
+        /* We encountered some error with this */
+        if (tmp->hdr->type == SOCK_STREAM)
+            tcp_connectfail(tmp->con);
+        goto out;
+    }
 
-	cmd_subsystem_connect(tmp->hdr, tmp->cmd, port, tmp->con);
+    cmd_subsystem_connect(tmp->hdr, tmp->cmd, port, tmp->con);
 
- out:
-	port_encapsulation_free(tmp);
+out:
+    port_encapsulation_free(tmp);
 }
 
 int
 cmd_subsystem_schedule_connect(struct tuple *hdr, struct command *cmd,
-    struct port *port, void *con)
-{
-	struct port_encapsulate *tmp = calloc(1, sizeof(*tmp));
-	struct subsystem *sub = port->sub;
+                               struct port *port, void *con) {
+    struct port_encapsulate *tmp = calloc(1, sizeof(*tmp));
+    struct subsystem *sub = port->sub;
 
-	if (tmp == NULL)
-		return (-1);
+    if (tmp == NULL)
+        return (-1);
 
-	tmp->hdr = hdr;
-	tmp->cmd = cmd;
-	tmp->port = port;
-	tmp->con = con;
+    tmp->hdr = hdr;
+    tmp->cmd = cmd;
+    tmp->port = port;
+    tmp->con = con;
 
-	/* Tell the connection that it has a pending connection */
-	tmp->hdr->pending = tmp;
+    /* Tell the connection that it has a pending connection */
+    tmp->hdr->pending = tmp;
 
-	TAILQ_INSERT_TAIL(&port->pending, tmp, next);
+    TAILQ_INSERT_TAIL(&port->pending, tmp, next);
 
-	TRACE(port->sub_fd,
-		event_new(libevent_base, port->sub_fd, EV_WRITE, cmd_subsystem_connect_cb, tmp));
-	TRACE(event_get_fd(tmp->ev),
-		event_add(tmp->ev, NULL));
+    TRACE(port->sub_fd,
+          event_new(libevent_base, port->sub_fd, EV_WRITE, cmd_subsystem_connect_cb, tmp));
+    TRACE(event_get_fd(tmp->ev),
+          event_add(tmp->ev, NULL));
 
-	syslog(LOG_DEBUG,
-	    "Scheduling connection establishment: %s -> subsystem \"%s\"",
-	    honeyd_contoa(hdr), sub->cmdstring);
+    syslog(LOG_DEBUG,
+           "Scheduling connection establishment: %s -> subsystem \"%s\"",
+           honeyd_contoa(hdr), sub->cmdstring);
 
-	return (0);
+    return (0);
 }
 
 int
 cmd_subsystem_connect(struct tuple *hdr, struct command *cmd,
-    struct port *port, void *con)
-{
-	struct callback *cb;
-	struct subsystem *sub = port->sub;
-	struct bundle bundle;
-	struct addr src, dst;
-	int pair[2];
-        
-	if (hdr->type == SOCK_STREAM)
-		cb = &cb_tcp;
-	else
-		cb = &cb_udp;
+                      struct port *port, void *con) {
+    struct callback *cb;
+    struct subsystem *sub = port->sub;
+    struct bundle bundle;
+    struct addr src, dst;
+    int pair[2];
 
-        if (socketpair(AF_LOCAL, hdr->type, 0, pair) == -1) {
-                warn("%s: socketpair: %s", __func__, sub->cmdstring);
-                return (-1);
-        }
+    if (hdr->type == SOCK_STREAM)
+        cb = &cb_tcp;
+    else
+        cb = &cb_udp;
 
-        if (fcntl(pair[0], F_SETFL, O_NONBLOCK) == -1)
-                warn("fcntl(O_NONBLOCK)");
+    if (socketpair(AF_LOCAL, hdr->type, 0, pair) == -1) {
+        warn("%s: socketpair: %s", __func__, sub->cmdstring);
+        return (-1);
+    }
 
-        if (fcntl(pair[0], F_SETFD, 1) == -1)
-                warn("fcntl(F_SETFD)");
+    if (fcntl(pair[0], F_SETFL, O_NONBLOCK) == -1)
+        warn("fcntl(O_NONBLOCK)");
 
-	TRACE(pair[0], cmd->pfd = pair[0]);
+    if (fcntl(pair[0], F_SETFD, 1) == -1)
+        warn("fcntl(F_SETFD)");
 
-	/* Prepare sockaddr for both src and destination */
-	addr_pack(&src, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_src,IP_ADDR_LEN);
-	addr_ntos(&src, (struct sockaddr *)&bundle.src);
-	bundle.src.sin_port = htons(hdr->sport);
-	addr_pack(&dst, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_dst,IP_ADDR_LEN);
-	addr_ntos(&dst, (struct sockaddr *)&bundle.dst);
-	bundle.dst.sin_port = htons(hdr->dport);
+    TRACE(pair[0], cmd->pfd = pair[0]);
 
-	if (send_fd(port->sub_fd, pair[1], &bundle, sizeof(bundle)) == -1) {
-		TRACE_RESET(pair[0], close(pair[0]));
-		TRACE_RESET(pair[1], close(pair[1]));
-		cmd->pfd = -1;
-		return (-1);
-	}
+    /* Prepare sockaddr for both src and destination */
+    addr_pack(&src, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_src, IP_ADDR_LEN);
+    addr_ntos(&src, (struct sockaddr *) &bundle.src);
+    bundle.src.sin_port = htons(hdr->sport);
+    addr_pack(&dst, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_dst, IP_ADDR_LEN);
+    addr_ntos(&dst, (struct sockaddr *) &bundle.dst);
+    bundle.dst.sin_port = htons(hdr->dport);
 
-	/* After transfering the file descriptor, we may close it */
-	TRACE_RESET(pair[1], close(pair[1]));
+    if (send_fd(port->sub_fd, pair[1], &bundle, sizeof(bundle)) == -1) {
+        TRACE_RESET(pair[0], close(pair[0]));
+        TRACE_RESET(pair[1], close(pair[1]));
+        cmd->pfd = -1;
+        return (-1);
+    }
 
-	/* We are connected now */
-	(*cb->cb_connect)(pair[0], EV_WRITE, con);
+    /* After transfering the file descriptor, we may close it */
+    TRACE_RESET(pair[1], close(pair[1]));
 
-	syslog(LOG_INFO, "Connection established: %s -> subsystem \"%s\"",
-	    honeyd_contoa(hdr), sub->cmdstring);
+    /* We are connected now */
+    (*cb->cb_connect)(pair[0], EV_WRITE, con);
 
-	return (0);
+    syslog(LOG_INFO, "Connection established: %s -> subsystem \"%s\"",
+           honeyd_contoa(hdr), sub->cmdstring);
+
+    return (0);
 }
 
 /*
@@ -742,83 +742,82 @@ cmd_subsystem_connect(struct tuple *hdr, struct command *cmd,
 
 int
 cmd_subsystem_localconnect(struct tuple *hdr, struct command *cmd,
-    struct port *port, void *con)
-{
-	struct callback *cb;
-	struct subsystem *sub = port->sub;
-	struct sockaddr_in si;
-	struct addr src;
-	int fd;
-        
-	if (hdr->type == SOCK_STREAM)
-		cb = &cb_tcp;
-	else
-		cb = &cb_udp;
+                           struct port *port, void *con) {
+    struct callback *cb;
+    struct subsystem *sub = port->sub;
+    struct sockaddr_in si;
+    struct addr src;
+    int fd;
 
-	/*
-	 * If we do not have a control file descriptor for this connection,
-	 * then get it now.  The control file descriptor will give us the
-	 * fd that is used for the real communication.
-	 */
-	if (port->sub_fd == -1) {
-		char res;
+    if (hdr->type == SOCK_STREAM)
+        cb = &cb_tcp;
+    else
+        cb = &cb_udp;
 
-		while ((fd = receive_fd(sub->cmd.pfd, NULL, NULL)) == -1) {
-			if (errno != EAGAIN) {
-				warnx("%s: receive_fd", __func__);
-			}
-		}
+    /*
+     * If we do not have a control file descriptor for this connection,
+     * then get it now.  The control file descriptor will give us the
+     * fd that is used for the real communication.
+     */
+    if (port->sub_fd == -1) {
+        char res;
 
-		/* Confirm success of failure */
-		res = fd == -1 ? -1 : 0;
-		TRACE(sub->cmd.pfd,
-		    atomicio(write, sub->cmd.pfd, &res, 1));
-		if (fd == -1)
-			return (-1);
+        while ((fd = receive_fd(sub->cmd.pfd, NULL, NULL)) == -1) {
+            if (errno != EAGAIN) {
+                warnx("%s: receive_fd", __func__);
+            }
+        }
 
-		TRACE(fd, port->sub_fd = fdshare_dup(fd));
-	}
+        /* Confirm success of failure */
+        res = fd == -1 ? -1 : 0;
+        TRACE(sub->cmd.pfd,
+              atomicio(write, sub->cmd.pfd, &res, 1));
+        if (fd == -1)
+            return (-1);
 
-	/* Get another fd on this special thingy */
-	while ((fd = receive_fd(port->sub_fd, NULL, NULL)) == -1) {
-		if (errno != EAGAIN) {
-			TRACE(port->sub_fd, fdshare_close(port->sub_fd));
-			warnx("%s: receive_fd", __func__);
-			return (-1);
-		}
-	}
+        TRACE(fd, port->sub_fd = fdshare_dup(fd));
+    }
 
-        if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1)
-                warn("%s: fcntl(O_NONBLOCK)", __func__);
+    /* Get another fd on this special thingy */
+    while ((fd = receive_fd(port->sub_fd, NULL, NULL)) == -1) {
+        if (errno != EAGAIN) {
+            TRACE(port->sub_fd, fdshare_close(port->sub_fd));
+            warnx("%s: receive_fd", __func__);
+            return (-1);
+        }
+    }
 
-        if (fcntl(fd, F_SETFD, 1) == -1)
-                warn("%s: fcntl(F_SETFD)", __func__);
+    if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1)
+        warn("%s: fcntl(O_NONBLOCK)", __func__);
 
-	TRACE(fd, cmd->pfd = fd);
+    if (fcntl(fd, F_SETFD, 1) == -1)
+        warn("%s: fcntl(F_SETFD)", __func__);
 
-	/* Prepare sockaddr */
-	addr_pack(&src, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_dst, IP_ADDR_LEN);
-	addr_ntos(&src, (struct sockaddr *)&si);
-	si.sin_port = htons(hdr->dport);
+    TRACE(fd, cmd->pfd = fd);
 
-	/* Write the bound socket address to the other side */
-	if (atomicio(write, port->sub_fd, &si, sizeof(si)) != sizeof(si)) {
-		TRACE(port->sub_fd, fdshare_close(port->sub_fd));
-		port->sub_fd = -1;
-		TRACE_RESET(cmd->pfd, close(cmd->pfd));
-		cmd->pfd = -1;
-		return (-1);
-	}
+    /* Prepare sockaddr */
+    addr_pack(&src, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_dst, IP_ADDR_LEN);
+    addr_ntos(&src, (struct sockaddr *) &si);
+    si.sin_port = htons(hdr->dport);
 
-	/* Now we may close the special thingy */
-	TRACE(port->sub_fd, fdshare_close(port->sub_fd));
-	port->sub_fd = -1;
+    /* Write the bound socket address to the other side */
+    if (atomicio(write, port->sub_fd, &si, sizeof(si)) != sizeof(si)) {
+        TRACE(port->sub_fd, fdshare_close(port->sub_fd));
+        port->sub_fd = -1;
+        TRACE_RESET(cmd->pfd, close(cmd->pfd));
+        cmd->pfd = -1;
+        return (-1);
+    }
 
-	/* We are connected now */
-	(*cb->cb_connect)(fd, EV_WRITE, con);
+    /* Now we may close the special thingy */
+    TRACE(port->sub_fd, fdshare_close(port->sub_fd));
+    port->sub_fd = -1;
 
-	syslog(LOG_INFO, "Connection established: subsystem \"%s\" -> %s",
-	    sub->cmdstring, honeyd_contoa(hdr));
+    /* We are connected now */
+    (*cb->cb_connect)(fd, EV_WRITE, con);
 
-	return (0);
+    syslog(LOG_INFO, "Connection established: subsystem \"%s\" -> %s",
+           sub->cmdstring, honeyd_contoa(hdr));
+
+    return (0);
 }

@@ -405,6 +405,72 @@ honeyd_contoa(const struct tuple *hdr)
 	return (buf);
 }
 
+char *
+honeyd_ntoa_src(const struct tuple *hdr)
+{
+	static char buf[128];
+	char asrc[24], adst[24];
+	struct addr src, dst;
+	u_short sport;
+
+	addr_pack(&src, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_src, IP_ADDR_LEN);
+	addr_pack(&dst, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_dst, IP_ADDR_LEN);
+
+	/* For a local connection switch the address around */
+	if (hdr->local) {
+		struct addr tmp;
+
+		tmp = src;
+		src = dst;
+		dst = tmp;
+
+		sport = hdr->dport;
+	} else {
+		sport = hdr->sport;
+	}
+
+	addr_ntop(&src, asrc, sizeof(asrc));
+	addr_ntop(&dst, adst, sizeof(adst));
+
+	snprintf(buf, sizeof(buf), "%s:%d",
+		asrc, sport);
+
+	return (buf);
+}
+
+char *
+honeyd_ntoa_dst(const struct tuple *hdr)
+{
+	static char buf[128];
+	char asrc[24], adst[24];
+	struct addr src, dst;
+	u_short dport;
+
+	addr_pack(&src, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_src, IP_ADDR_LEN);
+	addr_pack(&dst, ADDR_TYPE_IP, IP_ADDR_BITS, &hdr->ip_dst, IP_ADDR_LEN);
+
+	/* For a local connection switch the address around */
+	if (hdr->local) {
+		struct addr tmp;
+
+		tmp = src;
+		src = dst;
+		dst = tmp;
+
+		dport = hdr->sport;
+	} else {
+		dport = hdr->dport;
+	}
+
+	addr_ntop(&src, asrc, sizeof(asrc));
+	addr_ntop(&dst, adst, sizeof(adst));
+
+	snprintf(buf, sizeof(buf), "%s:%d",
+		 adst, dport);
+
+	return (buf);
+}
+
 /* Some stupid keyvalue stuff */
 
 void
