@@ -86,6 +86,7 @@ extern struct callback cb_udp;
 
 // log file for connection logs
 FILE *honeyd_conn_log;
+int honeyd_conn_log_fd;
 
 void
 cmd_trigger_read(struct command *cmd, int size) {
@@ -226,6 +227,7 @@ cmd_proxy_connect(struct tuple *hdr, struct command *cmd, struct addrinfo *ai,
                     "establish", inet_ntoa(local_addr.sin_addr), ntohs(local_addr.sin_port),
                     honeyd_ntoa_src(hdr), honeyd_ntoa_dst(hdr), host, port);
             fflush(honeyd_conn_log);
+            fdatasync(honeyd_conn_log_fd);
         }
     }
 

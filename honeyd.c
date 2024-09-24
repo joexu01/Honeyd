@@ -1075,6 +1075,14 @@ tcp_new(const struct interface *iface, struct ip_hdr *ip, struct tcp_hdr *tcp, i
 
 void
 tcp_free(struct tcp_con *con) {
+    // print connection closed before calling tcp_free()
+    if (honeyd_conn_log != NULL) {
+        fprintf(honeyd_conn_log,
+                "{\"type\": \"%s\", \"remoteAddr\": \"%s\", \"targetAddr\":\"%s\"}\n",
+                "close", honeyd_ntoa_src(&con->conhdr), honeyd_ntoa_dst(&con->conhdr));
+        fflush(honeyd_conn_log);
+        fdatasync(honeyd_conn_log_fd);
+    }
     struct port *port = con->port;
     struct port_encapsulate *pending = con->conhdr.pending;
 
@@ -1208,6 +1216,7 @@ honeyd_tcp_timeout(int fd, short event, void *arg) {
                 "{\"type\": \"%s\", \"remoteAddr\": \"%s\", \"targetAddr\":\"%s\"}\n",
                 "close", honeyd_ntoa_src(&con->conhdr), honeyd_ntoa_dst(&con->conhdr));
         fflush(honeyd_conn_log);
+        fdatasync(honeyd_conn_log_fd);
     }
 
     tcp_free(con);
@@ -2400,6 +2409,13 @@ close:
 dropwithreset:
     syslog(LOG_DEBUG, "Connection dropped with reset: tcp %s",
            honeyd_contoa(&con->conhdr));
+    if (honeyd_conn_log != NULL) {
+        fprintf(honeyd_conn_log,
+                "{\"type\": \"%s\", \"remoteAddr\": \"%s\", \"targetAddr\":\"%s\"}\n",
+                "close", honeyd_ntoa_src(&con->conhdr), honeyd_ntoa_dst(&con->conhdr));
+        fflush(honeyd_conn_log);
+        fdatasync(honeyd_conn_log_fd);
+    }
     if ((tiflags & TH_RST) == 0)
         tcp_send(con, TH_RST | TH_ACK, NULL, 0);
 free:
