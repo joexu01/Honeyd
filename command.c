@@ -143,7 +143,7 @@ cmd_ready_fd(struct command *cmd, struct callback *cb, void *con) {
 }
 
 struct addrinfo *
-cmd_proxy_getinfo(char *address, int type, short port) {
+cmd_proxy_getinfo(char *address, int type, u_short port) {
     struct addrinfo ai, *aitop;
     char strport[NI_MAXSERV];
 

@@ -141,6 +141,7 @@ Makefile.in
 /dpkt/dpkt/vrrp.pyc
 /dpkt/dpkt/yahoo.pyc
 /regress/regress.pyc
+.idea
 
 # Generated ostest Files #
 ##########################

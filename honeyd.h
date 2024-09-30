@@ -397,7 +397,7 @@ int cmd_subsystem(struct template *, struct subsystem *, char *, char **);
 
 struct addrinfo;
 
-struct addrinfo *cmd_proxy_getinfo(char *, int, short);
+struct addrinfo *cmd_proxy_getinfo(char *, int, u_short);
 
 int cmd_proxy_connect(struct tuple *, struct command *, struct addrinfo *,
                       void *);
